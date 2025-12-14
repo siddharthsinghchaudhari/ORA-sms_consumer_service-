@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  kafka:
+    image: redpanda/redpanda
+    command: redpanda start --overprovisioned --smp 1
+    ports:
+      - "9092:9092"
+
+  sms-service:
+    build: .
+    env_file: .env
+    depends_on:
+      - kafka
