@@ -11,7 +11,7 @@ logger = logging.getLogger("app.gateway.http_sms")
 
 class HttpSMSGateway(GatewayClient):
 
-    async def send_sms(self, sms: SMSMessage) -> None:
+    async def send_sms(self, sms: SMSMessage):
         logger.info(
             "Calling SMS gateway correlation_id=%s",
             sms.correlation_id,
@@ -41,23 +41,28 @@ class HttpSMSGateway(GatewayClient):
                     )
 
                     if resp.status_code == 429:
-                        logger.warning(
-                            "Gateway rate limited correlation_id=%s attempt=%s",
-                            sms.correlation_id,
-                            attempt + 1,
-                        )
                         await asyncio.sleep(2 ** attempt)
                         continue
 
                     resp.raise_for_status()
-                    return
 
-                except Exception:
+                    return {
+                        "success": True,
+                        "attempt": attempt + 1,
+                        "status_code": resp.status_code,
+                    }
+
+                except Exception as e:
                     if attempt == settings.GATEWAY_MAX_RETRIES - 1:
                         logger.exception(
                             "Gateway failed correlation_id=%s",
                             sms.correlation_id,
                         )
-                        raise
+                        return {
+                            "success": False,
+                            "attempt": attempt + 1,
+                            "error": str(e),
+                        }
 
                     await asyncio.sleep(2 ** attempt)
+

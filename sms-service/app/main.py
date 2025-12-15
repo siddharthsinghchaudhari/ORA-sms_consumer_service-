@@ -3,10 +3,10 @@ import logging
 from fastapi import FastAPI
 from prometheus_client import start_http_server
 
-from app.kafka.consumer import start_consumer
-from app.dlq.publisher import init_producer
+from app.queue.redis_stream_consumer import consume
+
 from app.config import settings
-from app.logging import setup_logging
+from app.log_config import setup_logging
 
 app = FastAPI()
 
@@ -22,13 +22,9 @@ async def startup():
     start_http_server(settings.METRICS_PORT)
     logger.info(f"Metrics server started on port {settings.METRICS_PORT}")
 
-    # Init DLQ producer
-    await init_producer()
-    logger.info("DLQ producer initialized")
-
-    # Start Kafka consumer in background
-    asyncio.create_task(start_consumer())
-    logger.info("Kafka consumer task started")
+    # Start Redis stream consumer
+    asyncio.create_task(consume())
+    logger.info("Redis stream consumer task started")
 
 
 @app.get("/health")

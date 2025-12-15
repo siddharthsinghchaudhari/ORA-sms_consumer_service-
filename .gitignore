@@ -1,0 +1,7 @@
+.venv/
+
+
+# Python
+# notification-orchestrator/__pycache__/
+*.pyc
+*.pyo

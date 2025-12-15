@@ -6,3 +6,5 @@ pydantic
 prometheus-client
 python-dotenv
 pydantic-settings
+motor
+redis>=5.0.0
