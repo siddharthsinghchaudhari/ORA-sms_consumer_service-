@@ -1,24 +1,32 @@
-import asyncio
 import logging
-import httpx
+import requests
 
 from app.config import settings
 from app.models.sms import SMSMessage
-from app.gateway.base import GatewayClient
 
 logger = logging.getLogger("app.gateway.http_sms")
 
 
-class HttpSMSGateway(GatewayClient):
+class HttpSMSGateway:
+    """
+    Synchronous SMS Gateway client for RQ workers.
+    Uses settings from .env for URL and API key.
+    """
 
-    async def send_sms(self, sms: SMSMessage):
-        logger.info(
-            "Calling SMS gateway correlation_id=%s",
-            sms.correlation_id,
-        )
+    def __init__(self):
+        self.url = settings.SMS_GATEWAY_URL
+        self.api_key = settings.SMS_GATEWAY_API_KEY
+        self.timeout = getattr(settings, "GATEWAY_TIMEOUT_SEC", 5)
+        self.max_retries = getattr(settings, "GATEWAY_MAX_RETRIES", 3)
+
+    def send_sms(self, sms: SMSMessage):
+        """
+        Send SMS synchronously.
+        Returns a dict: {"success": bool, "error": str, "attempt": int, "status_code": int}
+        """
 
         headers = {
-            "Authorization": f"Bearer {settings.SMS_GATEWAY_API_KEY}",
+            "Authorization": f"Bearer {self.api_key}",
             "X-Correlation-Id": sms.correlation_id,
             "Idempotency-Key": sms.correlation_id,
         }
@@ -28,41 +36,47 @@ class HttpSMSGateway(GatewayClient):
             "message": sms.body,
         }
 
-        async with httpx.AsyncClient(
-            timeout=settings.GATEWAY_TIMEOUT_SEC
-        ) as client:
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                logger.info(
+                    "Sending SMS correlation_id=%s attempt=%s",
+                    sms.correlation_id,
+                    attempt,
+                )
 
-            for attempt in range(settings.GATEWAY_MAX_RETRIES):
-                try:
-                    resp = await client.post(
-                        settings.SMS_GATEWAY_URL,
-                        json=payload,
-                        headers=headers,
+                resp = requests.post(
+                    self.url,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+
+                if resp.status_code == 429:
+                    # Too Many Requests → exponential backoff
+                    logger.warning(
+                        "Rate limited by gateway, correlation_id=%s, retry=%s",
+                        sms.correlation_id,
+                        attempt,
                     )
+                    backoff = 2 ** attempt
+                    import time
 
-                    if resp.status_code == 429:
-                        await asyncio.sleep(2 ** attempt)
-                        continue
+                    time.sleep(backoff)
+                    continue
 
-                    resp.raise_for_status()
+                resp.raise_for_status()
 
-                    return {
-                        "success": True,
-                        "attempt": attempt + 1,
-                        "status_code": resp.status_code,
-                    }
+                return {"success": True, "attempt": attempt, "status_code": resp.status_code}
 
-                except Exception as e:
-                    if attempt == settings.GATEWAY_MAX_RETRIES - 1:
-                        logger.exception(
-                            "Gateway failed correlation_id=%s",
-                            sms.correlation_id,
-                        )
-                        return {
-                            "success": False,
-                            "attempt": attempt + 1,
-                            "error": str(e),
-                        }
+            except Exception as e:
+                logger.exception(
+                    "SMS send failed correlation_id=%s attempt=%s",
+                    sms.correlation_id,
+                    attempt,
+                )
+                if attempt == self.max_retries:
+                    return {"success": False, "attempt": attempt, "error": str(e)}
 
-                    await asyncio.sleep(2 ** attempt)
+                import time
 
+                time.sleep(2 ** attempt)

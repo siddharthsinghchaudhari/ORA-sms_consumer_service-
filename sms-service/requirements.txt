@@ -8,3 +8,4 @@ python-dotenv
 pydantic-settings
 motor
 redis>=5.0.0
+rq>=1.14.0

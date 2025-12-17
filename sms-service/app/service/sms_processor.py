@@ -1,25 +1,26 @@
 import logging
 from datetime import datetime
-from zoneinfo import ZoneInfo
+import pytz
 
 from app.models.sms import SMSMessage
 from app.gateway.http_gateway import HttpSMSGateway
-from app.dlq.redis_dlq import publish_to_dlq
-from app.db.mongo import sms_collection
+from app.db.mongo_sync import sms_collection
 
 logger = logging.getLogger("app.service.sms_processor")
 gateway = HttpSMSGateway()
 
-IST = ZoneInfo("Asia/Kolkata")
+IST = pytz.timezone("Asia/Kolkata")
 
 
-async def process_message(payload: dict):
+def ist_now():
+    return datetime.now(IST)
+
+
+def process_sms(payload: dict):
     sms = SMSMessage(**payload)
+    now = ist_now()
 
-    now = datetime.now(IST)
-
-    # 1️⃣ Ensure document exists (idempotent by correlation_id)
-    doc = await sms_collection.find_one_and_update(
+    doc = sms_collection.find_one_and_update(
         {"correlation_id": sms.correlation_id},
         {
             "$setOnInsert": {
@@ -40,8 +41,7 @@ async def process_message(payload: dict):
         return_document=True,
     )
 
-    retry_count = doc.get("retry_count", 0)
-    attempt_no = retry_count + 1
+    attempt_no = doc.get("retry_count", 0) + 1
 
     try:
         logger.info(
@@ -50,23 +50,22 @@ async def process_message(payload: dict):
             attempt_no,
         )
 
-        gateway_result = await gateway.send_sms(sms)
+        result = gateway.send_sms(sms)
 
-        if not gateway_result["success"]:
-            raise Exception(gateway_result["error"])
+        if not result["success"]:
+            raise Exception(result["error"])
 
-        # 2️⃣ SUCCESS
-        await sms_collection.update_one(
+        sms_collection.update_one(
             {"correlation_id": sms.correlation_id},
             {
                 "$set": {
                     "status": "SUCCESS",
-                    "updated_at": datetime.now(IST),
+                    "updated_at": ist_now(),
                 },
                 "$push": {
                     "attempts": {
                         "attempt": attempt_no,
-                        "timestamp": datetime.now(IST),
+                        "timestamp": ist_now(),
                         "status": "SUCCESS",
                         "error": None,
                     }
@@ -75,26 +74,19 @@ async def process_message(payload: dict):
         )
 
     except Exception as e:
-        logger.exception(
-            "SMS failed correlation_id=%s attempt=%s",
-            sms.correlation_id,
-            attempt_no,
-        )
-
-        # 3️⃣ FAILURE
-        await sms_collection.update_one(
+        sms_collection.update_one(
             {"correlation_id": sms.correlation_id},
             {
                 "$set": {
                     "status": "FAILED",
                     "error": str(e),
-                    "updated_at": datetime.now(IST),
+                    "updated_at": ist_now(),
                 },
                 "$inc": {"retry_count": 1},
                 "$push": {
                     "attempts": {
                         "attempt": attempt_no,
-                        "timestamp": datetime.now(IST),
+                        "timestamp": ist_now(),
                         "status": "FAILED",
                         "error": str(e),
                     }
@@ -102,5 +94,5 @@ async def process_message(payload: dict):
             },
         )
 
-        await publish_to_dlq(payload, str(e))
+        logger.exception("SMS failed correlation_id=%s", sms.correlation_id)
         raise
